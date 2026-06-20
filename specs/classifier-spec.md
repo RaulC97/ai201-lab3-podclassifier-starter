@@ -91,10 +91,19 @@ the format below:" followed by the output format you chose.
 **What output format should you request from the LLM?**
 
 ```
-[blank — you need to parse the response in classify_episode(). What format
-makes parsing reliable? Think about: a single label on its own line?
-A structured format like "Label: X / Reasoning: Y"? JSON?
-What are the tradeoffs?]
+Request this exact format:
+
+Label: <one of interview, solo, panel, narrative>
+Reasoning: <one or two sentences explaining why>
+
+Why this format?
+- "Label: X" on its own line is trivial to parse: split on "Label:", take
+  the first token, strip whitespace, lowercase.
+- "Reasoning: Y" captures the explanation without free-form placement.
+- Avoids JSON (fragile — LLMs sometimes add prose around the braces) and
+  avoids a bare label (gives no reasoning to surface to the user).
+- Both fields appear on predictable lines, so you don't need a regex —
+  a simple split + strip is enough.
 ```
 
 ---
@@ -102,8 +111,19 @@ What are the tradeoffs?]
 **Edge cases to handle in the prompt:**
 
 ```
-[blank — what if labeled_examples is empty? What if the description is very
-short? How does your prompt handle these?]
+1. labeled_examples is empty:
+   The examples section should simply be omitted (or replaced with a note
+   like "No examples available."). The task instruction and output format
+   are still present, so the LLM can still attempt a zero-shot classification.
+   Don't crash — just skip the loop that adds example blocks.
+
+2. Description is very short (e.g., a single sentence or just a title):
+   Include whatever is there. Don't pad or modify it. The LLM handles terse
+   descriptions; forcing extra text would misrepresent the input.
+
+3. Description contains special characters or newlines:
+   No escaping needed — this is plain text sent as a string, not JSON.
+   Just include it verbatim between the "Description:" line and the next block.
 ```
 
 ---
@@ -159,9 +179,22 @@ Extract the response text from:
 **Step 3 — Parse the response:**
 
 ```
-[blank — how do you extract the label and reasoning from the LLM's text output?
-What string operations or parsing logic do you need?
-This depends on the output format you chose in build_few_shot_prompt.]
+The LLM response will look like:
+  Label: interview
+  Reasoning: The description mentions a host interviewing a guest expert.
+
+Parsing steps:
+  1. Split the response text by newline: lines = raw_text.strip().splitlines()
+  2. Find the line that starts with "Label:" — extract everything after the colon,
+     strip whitespace, and lowercase it:
+       label = line.split("Label:", 1)[1].strip().lower()
+  3. Find the line that starts with "Reasoning:" — extract everything after the
+     colon and strip whitespace:
+       reasoning = line.split("Reasoning:", 1)[1].strip()
+  4. If either line is not found, set the corresponding value to "" or "unknown".
+
+You can also do this with a simple loop over lines rather than searching the
+whole text at once — either approach works.
 ```
 
 ---
@@ -169,8 +202,16 @@ This depends on the output format you chose in build_few_shot_prompt.]
 **Step 4 — Validate the label:**
 
 ```
-[blank — what do you do if the LLM returns a label that isn't in VALID_LABELS?
-What should label be set to?]
+After parsing, check:
+  if label not in VALID_LABELS:
+      label = "unknown"
+
+VALID_LABELS = ["interview", "solo", "panel", "narrative"]
+
+This handles cases where the LLM returns something like "Interview" (wrong case —
+already handled by .lower()), "N/A", a full sentence instead of a single word,
+or an empty string. Setting it to "unknown" keeps the return shape consistent
+and lets the evaluation loop count how many episodes couldn't be classified.
 ```
 
 ---
@@ -178,9 +219,22 @@ What should label be set to?]
 **Step 5 — Handle errors gracefully:**
 
 ```
-[blank — what could go wrong? (Network error? Unparseable response?)
-What should the function return if something fails?
-Hint: the evaluation loop runs 20 calls — one bad response shouldn't crash everything.]
+Wrap the entire function body in a try/except block:
+
+  try:
+      # steps 1-4 here
+      return {"label": label, "reasoning": reasoning}
+  except Exception as e:
+      return {"label": "unknown", "reasoning": f"Error: {e}"}
+
+Things that can go wrong:
+  - Network/API error (Groq is unreachable, rate limit hit, bad API key)
+  - The LLM returns an empty response or None
+  - The response doesn't contain "Label:" or "Reasoning:" at all (unparseable)
+  - The response has extra formatting (markdown bold, bullet points, etc.)
+
+In all cases, returning {"label": "unknown", "reasoning": "Error: ..."} keeps
+the evaluation loop running across all 20 episodes instead of crashing partway.
 ```
 
 ---
